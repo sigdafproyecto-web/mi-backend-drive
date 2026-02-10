@@ -67,13 +67,12 @@ class handler(BaseHTTPRequestHandler):
             uploaded_files = {}
 
             # --- SUBIDA DE IMAGEN ---
-            # CORRECCIÓN: Quitamos 'resumable=False' para evitar el error "Cannot be converted to bool"
             if file_item and file_item.file:
                 file_content = file_item.file.read()
                 file_metadata = {'name': f'Reporte_{timestamp}.jpg', 'parents': [FOLDER_ID]}
                 
                 # Dejamos que MediaIoBaseUpload use su configuración por defecto
-                media = MediaIoBaseUpload(io.BytesIO(file_content), mimetype='image/jpeg')
+                media = MediaIoBaseUpload(io.BytesIO(file_content), mimetype='image/jpeg',resumable=False)
                 
                 file = drive_service.files().create(
                     body=file_metadata, 
@@ -83,11 +82,10 @@ class handler(BaseHTTPRequestHandler):
                 uploaded_files['image_id'] = file.get('id')
 
             # --- SUBIDA DE TEXTO ---
-            # CORRECCIÓN: Quitamos 'resumable=False' aquí también
             report_text = f"REPORTE\nTítulo: {title}\nLat: {latitude}\nLon: {longitude}\nImg: Reporte_{timestamp}.jpg"
             txt_metadata = {'name': f'Reporte_{timestamp}.txt', 'parents': [FOLDER_ID]}
             
-            txt_media = MediaIoBaseUpload(io.BytesIO(report_text.encode('utf-8')), mimetype='text/plain')
+            txt_media = MediaIoBaseUpload(io.BytesIO(report_text.encode('utf-8')), mimetype='text/plain',resumable=False)
             
             drive_service.files().create(
                 body=txt_metadata, 
