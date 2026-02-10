@@ -6,32 +6,29 @@ import json
 import io
 import cgi
 import os
+import time  
 
 # --- CONFIGURACIÓN ---
-# Scopes necesarios para subir archivos
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
-
-# TU ID DE CARPETA (Confirmado en tu mensaje anterior)
 FOLDER_ID = '1O_ZkJIeiDTC-9LM_1EXVNOlgYfoRP84u' 
 
 def get_drive_service():
     """
-    Autentica con Google Drive usando el JSON completo almacenado en Vercel.
-    Esto evita errores de formato en la llave privada.
+    Autentica con Google Drive usando el JSON completo de credenciales.
     """
     try:
-        # Intentamos leer la variable que contiene TODO el JSON
+        # 1. Intentar leer la variable que tiene TODO el JSON (Recomendado)
         creds_json = os.environ.get('GOOGLE_CREDENTIALS')
         
         if creds_json:
-            print("Intentando autenticación con JSON completo...")
-            # json.loads maneja automáticamente los escapes y saltos de línea
+            # json.loads maneja automáticamente los caracteres especiales
             service_account_info = json.loads(creds_json)
         else:
-            # Fallback: Si no existe GOOGLE_CREDENTIALS, intentamos armarlo (Método antiguo)
-            print("ADVERTENCIA: Usando método antiguo (variables separadas)...")
+            # 2. Fallback: Intentar armarlo con variables sueltas (Método antiguo)
+            print("Advertencia: Usando variables individuales...")
             private_key = os.environ.get('GOOGLE_PRIVATE_KEY', '')
-            # Limpieza agresiva para evitar el error InvalidByte
+            
+            # Limpieza para evitar errores de formato
             if private_key.startswith('"') and private_key.endswith('"'):
                 private_key = private_key[1:-1]
             private_key = private_key.replace('\\n', '\n').replace('\\\\n', '\n')
@@ -43,27 +40,25 @@ def get_drive_service():
                 "token_uri": "https://oauth2.googleapis.com/token",
             }
 
-        # Generar credenciales
+        # Crear credenciales
         creds = service_account.Credentials.from_service_account_info(
             service_account_info, scopes=SCOPES
         )
         return build('drive', 'v3', credentials=creds)
 
     except Exception as e:
-        print(f"Error CRÍTICO en autenticación: {str(e)}")
+        print(f"Error CRÍTICO al autenticar: {str(e)}")
         raise e
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
-            # 1. Configurar headers para parsear el form-data que envía Expo
+            # 1. Preparar headers para recibir archivos (multipart/form-data)
             ctype, pdict = cgi.parse_header(self.headers.get('content-type'))
-            
-            # Ajuste necesario para cgi en entornos serverless
             if ctype == 'multipart/form-data':
                 pdict['boundary'] = bytes(pdict['boundary'], "utf-8")
                 
-            # 2. Leer los datos enviados desde el celular
+            # 2. Procesar el formulario enviado desde Expo
             form = cgi.FieldStorage(
                 fp=self.rfile,
                 headers=self.headers,
@@ -72,22 +67,20 @@ class handler(BaseHTTPRequestHandler):
                          }
             )
 
-            # 3. Extraer valores del formulario
-            # Nota: form.getvalue devuelve bytes o string dependiendo del envío
+            # 3. Extraer datos
             file_item = form['photo'] if 'photo' in form else None
-            title = form.getvalue('title')
-            latitude = form.getvalue('latitude')
-            longitude = form.getvalue('longitude')
+            title = form.getvalue('title') or "Sin título"
+            latitude = form.getvalue('latitude') or "0.0"
+            longitude = form.getvalue('longitude') or "0.0"
             
-            # Generar timestamp para el nombre
+            # Generar timestamp (ESTO ERA LO QUE FALLABA ANTES)
             timestamp = int(time.time())
 
             # 4. Conectar a Google Drive
             drive_service = get_drive_service()
-
             uploaded_files = {}
 
-            # --- SUBIR IMAGEN ---
+            # --- SUBIR LA IMAGEN ---
             if file_item and file_item.file:
                 file_content = file_item.file.read()
                 
@@ -105,18 +98,13 @@ class handler(BaseHTTPRequestHandler):
                 file = drive_service.files().create(
                     body=file_metadata,
                     media_body=media,
-                    fields='id, name'
+                    fields='id'
                 ).execute()
                 uploaded_files['image_id'] = file.get('id')
 
-            # --- SUBIR TEXTO (RESUMEN) ---
-            report_text = f"""REPORTE DE INCIDENTE
---------------------
-Título:    {title}
-Latitud:   {latitude}
-Longitud:  {longitude}
-Referencia Imagen: Reporte_{timestamp}.jpg
-"""
+            # --- SUBIR EL TEXTO ---
+            report_text = f"REPORTE DE INCIDENTE\n--------------------\nTítulo: {title}\nLatitud: {latitude}\nLongitud: {longitude}\nReferencia Imagen: Reporte_{timestamp}.jpg"
+            
             txt_metadata = {
                 'name': f'Reporte_{timestamp}.txt',
                 'parents': [FOLDER_ID]
@@ -133,7 +121,7 @@ Referencia Imagen: Reporte_{timestamp}.jpg
                 fields='id'
             ).execute()
 
-            # 5. RESPONDER AL CELULAR (ÉXITO)
+            # 5. RESPONDER ÉXITO (JSON)
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
@@ -145,7 +133,7 @@ Referencia Imagen: Reporte_{timestamp}.jpg
             self.wfile.write(response_data.encode('utf-8'))
 
         except Exception as e:
-            # 6. MANEJO DE ERRORES (Para que Expo no reciba HTML/Texto plano)
+            # 6. MANEJO DE ERRORES
             print(f"Error en servidor: {str(e)}")
             self.send_response(500)
             self.send_header('Content-type', 'application/json')
