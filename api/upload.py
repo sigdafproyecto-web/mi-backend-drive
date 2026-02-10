@@ -5,7 +5,7 @@ from googleapiclient.http import MediaIoBaseUpload
 import json, io, time, cgi, os
 
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
-FOLDER_ID = 'Reportes'  
+FOLDER_ID = '1O_ZkJIeiDTC-9LM_1EXVNOlgYfoRP84u'  
 
 service_account_info = json.loads(os.environ['GOOGLE_CREDENTIALS'])
 credentials = service_account.Credentials.from_service_account_info(
