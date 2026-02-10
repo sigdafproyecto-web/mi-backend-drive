@@ -2,131 +2,156 @@ from http.server import BaseHTTPRequestHandler
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-import json, io, time, cgi, os
+import json
+import io
+import cgi
+import os
 
 # --- CONFIGURACIÓN ---
+# Scopes necesarios para subir archivos
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
-# Usando el ID de carpeta confirmado: 1O_ZkJIeiDTC-9LM_1EXVNOlgYfoRP84u
+
+# TU ID DE CARPETA (Confirmado en tu mensaje anterior)
 FOLDER_ID = '1O_ZkJIeiDTC-9LM_1EXVNOlgYfoRP84u' 
 
 def get_drive_service():
-    """Configura las credenciales usando variables de entorno de Vercel."""
-    # Obtenemos la llave privada y corregimos los saltos de línea (\n)
-    private_key = os.environ.get('GOOGLE_PRIVATE_KEY', '')
-    if private_key:
-        # Esto elimina el error "Unable to load PEM file" al convertir \n texto en saltos reales
-        private_key = private_key.replace('\\n', '\n')
-
-    service_account_info = {
-        "type": "service_account",
-        "project_id": os.environ.get('GOOGLE_PROJECT_ID'),
-        "private_key": private_key,
-        "client_email": os.environ.get('GOOGLE_CLIENT_EMAIL'),
-        "token_uri": "https://oauth2.googleapis.com/token",
-    }
-    
-    credentials = service_account.Credentials.from_service_account_info(
-        service_account_info, scopes=SCOPES)
-    return build('drive', 'v3', credentials=credentials)
-
-class handler(BaseHTTPRequestHandler):
-
-    def do_OPTIONS(self):
-        """Manejo de CORS para peticiones desde el App."""
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', '*')
-        self.end_headers()
-
-    def do_POST(self):
-        try:
-            # Inicializar el servicio de Google Drive
-            drive_service = get_drive_service()
-
-            # Leer y parsear el contenido multipart (imagen y datos)
-            content_type = self.headers.get('Content-Type')
-            ctype, pdict = cgi.parse_header(content_type)
+    """
+    Autentica con Google Drive usando el JSON completo almacenado en Vercel.
+    Esto evita errores de formato en la llave privada.
+    """
+    try:
+        # Intentamos leer la variable que contiene TODO el JSON
+        creds_json = os.environ.get('GOOGLE_CREDENTIALS')
+        
+        if creds_json:
+            print("Intentando autenticación con JSON completo...")
+            # json.loads maneja automáticamente los escapes y saltos de línea
+            service_account_info = json.loads(creds_json)
+        else:
+            # Fallback: Si no existe GOOGLE_CREDENTIALS, intentamos armarlo (Método antiguo)
+            print("ADVERTENCIA: Usando método antiguo (variables separadas)...")
+            private_key = os.environ.get('GOOGLE_PRIVATE_KEY', '')
+            # Limpieza agresiva para evitar el error InvalidByte
+            if private_key.startswith('"') and private_key.endswith('"'):
+                private_key = private_key[1:-1]
+            private_key = private_key.replace('\\n', '\n').replace('\\\\n', '\n')
             
-            pdict['boundary'] = bytes(pdict['boundary'], 'utf-8')
-            pdict['CONTENT-LENGTH'] = int(self.headers.get('Content-Length', 0))
-
-            fields = cgi.parse_multipart(self.rfile, pdict)
-
-            # Extraer campos enviados desde ReportForm.tsx
-            photo_data = fields.get('photo')[0]
-            title      = fields.get('title', ['Sin título'])[0]
-            address    = fields.get('address', ['Sin dirección'])[0]
-            date       = fields.get('date', [''])[0]
-            time_val   = fields.get('time', [''])[0]
-            latitude   = fields.get('latitude', ['0'])[0]
-            longitude  = fields.get('longitude', ['0'])[0]
-
-            timestamp = int(time.time())
-
-            # 1. Subir la imagen WebP a la carpeta específica
-            file_metadata = {
-                'name': f'Reporte_{timestamp}.webp',
-                'parents': [FOLDER_ID],
-                'description': f'Título: {title} | Dir: {address} | Coords: {latitude}, {longitude}'
+            service_account_info = {
+                "private_key": private_key,
+                "client_email": os.environ.get('GOOGLE_CLIENT_EMAIL'),
+                "project_id": os.environ.get('GOOGLE_PROJECT_ID'),
+                "token_uri": "https://oauth2.googleapis.com/token",
             }
 
-            media = MediaIoBaseUpload(
-                io.BytesIO(photo_data),
-                mimetype='image/webp'
+        # Generar credenciales
+        creds = service_account.Credentials.from_service_account_info(
+            service_account_info, scopes=SCOPES
+        )
+        return build('drive', 'v3', credentials=creds)
+
+    except Exception as e:
+        print(f"Error CRÍTICO en autenticación: {str(e)}")
+        raise e
+
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        try:
+            # 1. Configurar headers para parsear el form-data que envía Expo
+            ctype, pdict = cgi.parse_header(self.headers.get('content-type'))
+            
+            # Ajuste necesario para cgi en entornos serverless
+            if ctype == 'multipart/form-data':
+                pdict['boundary'] = bytes(pdict['boundary'], "utf-8")
+                
+            # 2. Leer los datos enviados desde el celular
+            form = cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ={'REQUEST_METHOD': 'POST',
+                         'CONTENT_TYPE': self.headers['Content-Type'],
+                         }
             )
 
-            file = drive_service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id, name'
-            ).execute()
+            # 3. Extraer valores del formulario
+            # Nota: form.getvalue devuelve bytes o string dependiendo del envío
+            file_item = form['photo'] if 'photo' in form else None
+            title = form.getvalue('title')
+            latitude = form.getvalue('latitude')
+            longitude = form.getvalue('longitude')
+            
+            # Generar timestamp para el nombre
+            timestamp = int(time.time())
 
-            # 2. Crear un archivo de texto con el resumen del incidente
+            # 4. Conectar a Google Drive
+            drive_service = get_drive_service()
+
+            uploaded_files = {}
+
+            # --- SUBIR IMAGEN ---
+            if file_item and file_item.file:
+                file_content = file_item.file.read()
+                
+                file_metadata = {
+                    'name': f'Reporte_{timestamp}.jpg',
+                    'parents': [FOLDER_ID]
+                }
+                
+                media = MediaIoBaseUpload(
+                    io.BytesIO(file_content),
+                    mimetype='image/jpeg',
+                    resumable=True
+                )
+                
+                file = drive_service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id, name'
+                ).execute()
+                uploaded_files['image_id'] = file.get('id')
+
+            # --- SUBIR TEXTO (RESUMEN) ---
             report_text = f"""REPORTE DE INCIDENTE
-====================
+--------------------
 Título:    {title}
-Dirección: {address}
-Fecha:     {date}
-Hora:      {time_val}
 Latitud:   {latitude}
 Longitud:  {longitude}
-Imagen:    Reporte_{timestamp}.webp
+Referencia Imagen: Reporte_{timestamp}.jpg
 """
             txt_metadata = {
                 'name': f'Reporte_{timestamp}.txt',
-                'parents': [FOLDER_ID],
+                'parents': [FOLDER_ID]
             }
-
+            
             txt_media = MediaIoBaseUpload(
                 io.BytesIO(report_text.encode('utf-8')),
                 mimetype='text/plain'
             )
-
+            
             drive_service.files().create(
                 body=txt_metadata,
                 media_body=txt_media,
                 fields='id'
             ).execute()
 
-            # Enviar respuesta de éxito en JSON para que el App lo reciba correctamente
+            # 5. RESPONDER AL CELULAR (ÉXITO)
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({
-                'success': True,
-                'fileId': file.get('id'),
-                'fileName': file.get('name')
-            }).encode())
+            response_data = json.dumps({
+                "success": True, 
+                "message": "Reporte subido correctamente",
+                "files": uploaded_files
+            })
+            self.wfile.write(response_data.encode('utf-8'))
 
         except Exception as e:
-            # Capturar cualquier error y devolverlo como JSON para evitar SyntaxError en Expo
+            # 6. MANEJO DE ERRORES (Para que Expo no reciba HTML/Texto plano)
+            print(f"Error en servidor: {str(e)}")
             self.send_response(500)
             self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            self.wfile.write(json.dumps({
-                'success': False,
-                'error': str(e)
-            }).encode())
+            error_response = json.dumps({
+                "success": False, 
+                "error": str(e)
+            })
+            self.wfile.write(error_response.encode('utf-8'))
